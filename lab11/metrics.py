@@ -18,34 +18,74 @@ def ego_events(R: core.Rollout, k: int) -> list[dict]:
 
 
 def min_ttc(R: core.Rollout, cap: float = 10.0) -> np.ndarray:
-    """TODO 1. (K,) smallest time-to-collision between the ego and whatever it is following, capped at `cap` s.
+    K, NF = R.F.shape[0], R.F.shape[1]
+    ego_idx = core.IX["ego"]
 
-    - The ego's leader at frame f is R.EGO[k, f, 3] (an actor index, -1 = nothing ahead).
-    - Gap is bumper to bumper along the ego's heading: lon - 2.3 - (leader length / 2), where
-      lon = (x_leader - x_ego) * hx_ego + (z_leader - z_ego) * hz_ego (the leader's position seen from the ego) and
-      2.3 is half the ego's length. Leader length: core.LEN[j] for actor j; use 0.3 m as the half-length of a
-      pedestrian. Clip the gap at 0.
-    - TTC = gap / (v_ego - v_leader), only while the ego is closing in by more than 0.1 m/s.
-    - A scenario where the ego crashed (see ego_events) returns 0.
-    Shapes: R.F is (K, NF, N, 7) with x, z, hx, hz, v, a, d; core.IX["ego"] is the ego's actor index.
-    Vectorise over frames (a Python loop over 481 frames x K scenarios is too slow for Part C).
-    """
-    raise NotImplementedError("TODO 1: min_ttc")
+    leader_idx = R.EGO[..., 3].astype(int)
+    valid = leader_idx >= 0
+    safe_leader = np.where(valid, leader_idx, 0)
+
+    x_ego = R.F[:, :, ego_idx, 0]
+    z_ego = R.F[:, :, ego_idx, 1]
+    hx_ego = R.F[:, :, ego_idx, 2]
+    hz_ego = R.F[:, :, ego_idx, 3]
+    v_ego = R.F[:, :, ego_idx, 4]
+
+    k_idx = np.arange(K)[:, None]
+    f_idx = np.arange(NF)[None, :]
+    F_leader = R.F[k_idx, f_idx, safe_leader]
+    x_leader = F_leader[..., 0]
+    z_leader = F_leader[..., 1]
+    v_leader = F_leader[..., 4]
+
+    leader_half_len = core.LEN[safe_leader] / 2.0
+    rx = x_leader - x_ego
+    rz = z_leader - z_ego
+    lon = rx * hx_ego + rz * hz_ego
+
+    gap = np.maximum(lon - 2.3 - leader_half_len, 0.0)
+    dv = v_ego - v_leader
+    closing = valid & (dv > 0.1)
+
+    safe_dv = np.where(closing, dv, 1.0)
+    ttc = np.where(closing, gap / safe_dv, np.inf)
+    min_val = np.minimum(cap, np.min(ttc, axis=1))
+
+    crashed = np.array([len(ego_events(R, k)) > 0 for k in range(K)])
+    return np.where(crashed, 0.0, min_val)
 
 
 def contact_type(R: core.Rollout, k: int, event: dict) -> str:
-    """TODO 2. 'front' (the ego ran into it), 'rear' (it ran into the ego) or 'side', at the contact frame.
+    other = event["b"] if event["a"] == "ego" else event["a"]
+    other_idx = core.IX[other]
+    f = event["f"]
 
-    Put the other actor in the ego's frame: lon = r . h, lat = -r_x h_z + r_z h_x with h = (hx, hz) of the ego.
-    'front' if lon > 2.3 and |lat| < 1.6; 'rear' if lon < -2.3 and |lat| < 1.6; otherwise 'side'.
-    """
-    raise NotImplementedError("TODO 2: contact_type")
+    ego = R.F[k, f, core.IX["ego"]]
+    other_actor = R.F[k, f, other_idx]
+
+    rx = other_actor[0] - ego[0]
+    rz = other_actor[1] - ego[1]
+    hx, hz = ego[2], ego[3]
+
+    lon = rx * hx + rz * hz
+    lat = -rx * hz + rz * hx
+
+    if lon > 2.3 and abs(lat) < 1.6:
+        return "front"
+    if lon < -2.3 and abs(lat) < 1.6:
+        return "rear"
+    return "side"
 
 
 def progress_metrics(R: core.Rollout) -> tuple[np.ndarray, np.ndarray]:
-    """TODO 9. Two (K,) arrays: the distance the ego covers in the 24 s (sum of frame-to-frame steps, metres),
-    and the number of frames where the ego brakes harder than 3 m/s^2 (acceleration column < -3)."""
-    raise NotImplementedError("TODO 9: progress_metrics")
+    ego_idx = core.IX["ego"]
+    ego_pos = R.F[:, :, ego_idx, :2]
+    diff = np.diff(ego_pos, axis=1)
+    dist = np.sum(np.hypot(diff[..., 0], diff[..., 1]), axis=1)
+
+    ego_accel = R.F[:, :, ego_idx, 5]
+    harsh = np.sum(ego_accel < -3.0, axis=1)
+    return dist, harsh
 
 
 # ---------------------------------------------------------------- given helpers
